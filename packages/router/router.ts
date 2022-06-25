@@ -737,6 +737,7 @@ export function createRouter(init: RouterInit): Router {
   ): Promise<void> {
     // Abort any in-progress navigations and start a new one
     pendingNavigationController?.abort();
+    pendingNavigationController = null;
     pendingAction = historyAction;
 
     // Unset any ongoing uninterrupted revalidations (unless told otherwise),
@@ -780,7 +781,6 @@ export function createRouter(init: RouterInit): Router {
     }
 
     // Call action if we received an action submission
-    let request = createRequest(location, opts?.submission);
     let pendingActionData: RouteData | undefined;
     let pendingError: RouteData | undefined;
 
@@ -794,7 +794,6 @@ export function createRouter(init: RouterInit): Router {
       };
     } else if (opts?.submission) {
       let actionOutput = await handleAction(
-        request,
         location,
         opts.submission,
         matches,
@@ -819,7 +818,6 @@ export function createRouter(init: RouterInit): Router {
     // Call loaders
     let { shortCircuited, loaderData, errors } = await handleLoaders(
       historyAction,
-      request,
       location,
       opts?.submission,
       matches,
@@ -842,7 +840,6 @@ export function createRouter(init: RouterInit): Router {
   // Call the action matched by the leaf route for this navigation and handle
   // redirects/errors
   async function handleAction(
-    request: Request,
     location: Location,
     submission: Submission,
     matches: DataRouteMatch[],
@@ -890,17 +887,16 @@ export function createRouter(init: RouterInit): Router {
       };
     } else {
       // Create a controller for this data load
-      let actionAbortController = new AbortController();
-      pendingNavigationController = actionAbortController;
-
-      result = await callLoaderOrAction(
-        "action",
-        request,
-        actionMatch,
-        actionAbortController.signal
+      pendingNavigationController = new AbortController();
+      let request = createRequest(
+        location,
+        pendingNavigationController.signal,
+        submission
       );
 
-      if (actionAbortController.signal.aborted) {
+      result = await callLoaderOrAction("action", request, actionMatch);
+
+      if (request.signal.aborted) {
         return { shortCircuited: true };
       }
 
@@ -948,7 +944,6 @@ export function createRouter(init: RouterInit): Router {
   // errors, etc.
   async function handleLoaders(
     historyAction: HistoryAction,
-    request: Request,
     location: Location,
     submission: Submission | undefined,
     matches: DataRouteMatch[],
@@ -1027,22 +1022,25 @@ export function createRouter(init: RouterInit): Router {
     }
 
     // Start the data load
-    let abortController = new AbortController();
-    pendingNavigationController = abortController;
+    pendingNavigationController = new AbortController();
+    let request = createRequest(
+      location,
+      pendingNavigationController.signal,
+      submission
+    );
     pendingNavigationLoadId = ++incrementingLoadId;
     revalidatingFetchers.forEach(([key]) =>
-      fetchControllers.set(key, abortController)
+      fetchControllers.set(key, pendingNavigationController!)
     );
 
     let { results, loaderResults, fetcherResults } =
       await callLoadersAndResolveData(
         matchesToLoad,
         revalidatingFetchers,
-        request,
-        abortController.signal
+        request
       );
 
-    if (abortController.signal.aborted) {
+    if (request.signal.aborted) {
       return { shortCircuited: true };
     }
 
@@ -1144,17 +1142,16 @@ export function createRouter(init: RouterInit): Router {
 
     let { path, submission } = normalizeNavigateOptions(href, opts);
     let match = getTargetMatch(matches, path);
-    let request = createRequest(path, submission);
 
     if (submission) {
-      handleFetcherAction(key, routeId, request, match, submission);
+      handleFetcherAction(key, routeId, path, match, submission);
       return;
     }
 
     // Store off the match so we can call it's shouldRevalidate on subsequent
     // revalidations
     fetchLoadMatches.set(key, [path, match]);
-    handleFetcherLoader(key, routeId, request, match);
+    handleFetcherLoader(key, routeId, path, match);
   }
 
   // Call the action for the matched fetcher.submit(), and then handle redirects,
@@ -1162,7 +1159,7 @@ export function createRouter(init: RouterInit): Router {
   async function handleFetcherAction(
     key: string,
     routeId: string,
-    fetchRequest: Request,
+    path: string,
     match: DataRouteMatch,
     submission: Submission
   ) {
@@ -1192,16 +1189,12 @@ export function createRouter(init: RouterInit): Router {
 
     // Call the action for the fetcher
     let abortController = new AbortController();
+    let fetchRequest = createRequest(path, abortController.signal, submission);
     fetchControllers.set(key, abortController);
 
-    let actionResult = await callLoaderOrAction(
-      "action",
-      fetchRequest,
-      match,
-      abortController.signal
-    );
+    let actionResult = await callLoaderOrAction("action", fetchRequest, match);
 
-    if (abortController.signal.aborted) {
+    if (fetchRequest.signal.aborted) {
       // We can delete this so long as we weren't aborted by ou our own fetcher
       // re-submit which would have put _new_ controller is in fetchControllers
       if (fetchControllers.get(key) === abortController) {
@@ -1250,7 +1243,10 @@ export function createRouter(init: RouterInit): Router {
     // Start the data load for current matches, or the next location if we're
     // in the middle of a navigation
     let nextLocation = state.navigation.location || state.location;
-    let revalidationRequest = createRequest(nextLocation);
+    let revalidationRequest = createRequest(
+      nextLocation,
+      abortController.signal
+    );
     let matches =
       state.navigation.state !== "idle"
         ? matchRoutes(dataRoutes, state.navigation.location)
@@ -1305,8 +1301,7 @@ export function createRouter(init: RouterInit): Router {
       await callLoadersAndResolveData(
         matchesToLoad,
         revalidatingFetchers,
-        revalidationRequest,
-        abortController.signal
+        revalidationRequest
       );
 
     if (abortController.signal.aborted) {
@@ -1383,7 +1378,7 @@ export function createRouter(init: RouterInit): Router {
   async function handleFetcherLoader(
     key: string,
     routeId: string,
-    fetchRequest: Request,
+    path: string,
     match: DataRouteMatch
   ) {
     // Put this fetcher into it's loading state
@@ -1400,12 +1395,12 @@ export function createRouter(init: RouterInit): Router {
 
     // Call the loader for this fetcher route match
     let abortController = new AbortController();
+    let fetchRequest = createRequest(path, abortController.signal);
     fetchControllers.set(key, abortController);
     let result: DataResult = await callLoaderOrAction(
       "loader",
       fetchRequest,
-      match,
-      abortController.signal
+      match
     );
 
     // Deferred isn't supported or fetcher loads, await everything and treat it
@@ -1414,7 +1409,7 @@ export function createRouter(init: RouterInit): Router {
     // below if that happens
     if (isDeferredResult(result)) {
       result =
-        (await resolveDeferredData(result, abortController.signal)) || result;
+        (await resolveDeferredData(result, fetchRequest.signal)) || result;
     }
 
     // We can delete this so long as we weren't aborted by ou our own fetcher
@@ -1423,7 +1418,7 @@ export function createRouter(init: RouterInit): Router {
       fetchControllers.delete(key);
     }
 
-    if (abortController.signal.aborted) {
+    if (fetchRequest.signal.aborted) {
       return;
     }
 
@@ -1488,18 +1483,15 @@ export function createRouter(init: RouterInit): Router {
   async function callLoadersAndResolveData(
     matchesToLoad: DataRouteMatch[],
     fetchersToLoad: [string, string, DataRouteMatch][],
-    request: Request,
-    signal: AbortSignal
+    request: Request
   ) {
     // Call all navigation loaders and revalidating fetcher loaders in parallel,
     // then slice off the results into separate arrays so we can handle them
     // accordingly
     let results = await Promise.all([
-      ...matchesToLoad.map((m) =>
-        callLoaderOrAction("loader", request, m, signal)
-      ),
+      ...matchesToLoad.map((m) => callLoaderOrAction("loader", request, m)),
       ...fetchersToLoad.map(([, href, match]) =>
-        callLoaderOrAction("loader", createRequest(href), match, signal)
+        callLoaderOrAction("loader", createRequest(href, request.signal), match)
       ),
     ]);
     let loaderResults = results.slice(0, matchesToLoad.length);
@@ -1508,7 +1500,7 @@ export function createRouter(init: RouterInit): Router {
     await resolveDeferredResults(
       matchesToLoad,
       loaderResults,
-      signal,
+      request.signal,
       state.loaderData,
       activeDeferreds
     );
@@ -1516,7 +1508,7 @@ export function createRouter(init: RouterInit): Router {
     await resolveDeferredResults(
       fetchersToLoad.map(([, , match]) => match),
       fetcherResults,
-      signal
+      request.signal
     );
 
     return { results, loaderResults, fetcherResults };
@@ -1809,7 +1801,6 @@ export function createStaticHandler(init: StaticHandlerInit): StaticHandler {
         "action",
         request,
         actionMatch,
-        request.signal,
         true,
         isRouteRequest
       );
@@ -1821,7 +1812,7 @@ export function createStaticHandler(init: StaticHandlerInit): StaticHandler {
 
     if (isRedirectResult(result)) {
       // Uhhhh - this should never happen, we should always throw these from
-      // calLoadOrAction, but the type narrowing here keeps TS happy and we
+      // calLoaderOrAction, but the type narrowing here keeps TS happy and we
       // can get back on the "throw all redirect responses" train here should
       // this ever happen :/
       throw new Response(null, {
@@ -1894,14 +1885,7 @@ export function createStaticHandler(init: StaticHandlerInit): StaticHandler {
 
     let results = await Promise.all([
       ...matchesToLoad.map((m) =>
-        callLoaderOrAction(
-          "loader",
-          request,
-          m,
-          request.signal,
-          true,
-          isRouteRequest
-        )
+        callLoaderOrAction("loader", request, m, true, isRouteRequest)
       ),
     ]);
     if (request.signal.aborted) {
@@ -2238,7 +2222,6 @@ async function callLoaderOrAction(
   type: "loader" | "action",
   request: Request,
   match: DataRouteMatch,
-  signal: AbortSignal,
   skipRedirects: boolean = false,
   isRouteRequest: boolean = false
 ): Promise<DataResult> {
@@ -2255,7 +2238,6 @@ async function callLoaderOrAction(
     result = await handler({
       params: match.params,
       request,
-      signal,
     });
   } catch (e) {
     resultType = ResultType.error;
@@ -2318,28 +2300,23 @@ async function callLoaderOrAction(
 
 function createRequest(
   location: string | Location,
+  signal: AbortSignal,
   submission?: Submission
 ): Request {
   let url = createURL(location).toString();
+  let init: RequestInit = { signal };
 
-  if (!submission) {
-    return new Request(url);
-  }
-
-  let { formMethod, formEncType, formData } = submission;
-  let body = formData;
-
-  // If we're submitting application/x-www-form-urlencoded, then body should
-  // be of type URLSearchParams
-  if (formEncType === "application/x-www-form-urlencoded") {
-    body = convertFormDataToSearchParams(formData);
+  if (submission) {
+    let { formMethod, formEncType, formData } = submission;
+    init.method = formMethod.toUpperCase();
+    init.body =
+      formEncType === "application/x-www-form-urlencoded"
+        ? convertFormDataToSearchParams(formData)
+        : formData;
   }
 
   // Content-Type is inferred (https://fetch.spec.whatwg.org/#dom-request)
-  return new Request(url, {
-    method: formMethod.toUpperCase(),
-    body,
-  });
+  return new Request(url, init);
 }
 
 function convertFormDataToSearchParams(
