@@ -1107,14 +1107,7 @@ export function createRouter(init: RouterInit): Router {
 
     let matches = matchRoutes(dataRoutes, href);
     if (!matches) {
-      let boundaryMatch = findNearestBoundary(state.matches, routeId);
-      state.fetchers.set(key, IDLE_FETCHER);
-      updateState({
-        errors: {
-          [boundaryMatch.route.id]: new ErrorResponse(404, "Not Found", null),
-        },
-        fetchers: new Map(state.fetchers),
-      });
+      setFetcherError(key, routeId, new ErrorResponse(404, "Not Found", null));
       return;
     }
 
@@ -1155,6 +1148,12 @@ export function createRouter(init: RouterInit): Router {
         abortFetcher(key);
       }
     });
+
+    if (!match.route.action) {
+      let { error } = getMethodNotAllowedResult(path);
+      setFetcherError(key, routeId, error);
+      return;
+    }
 
     // Put this fetcher into it's submitting state
     let fetcher: FetcherStates["Submitting"] = {
@@ -1203,14 +1202,7 @@ export function createRouter(init: RouterInit): Router {
 
     // Process any non-redirect errors thrown
     if (isErrorResult(actionResult)) {
-      let boundaryMatch = findNearestBoundary(state.matches, routeId);
-      deleteFetcher(key);
-      updateState({
-        fetchers: new Map(state.fetchers),
-        errors: {
-          [boundaryMatch.route.id]: actionResult.error,
-        },
-      });
+      setFetcherError(key, routeId, actionResult.error);
       return;
     }
 
@@ -1493,6 +1485,17 @@ export function createRouter(init: RouterInit): Router {
     );
 
     return { results, loaderResults, fetcherResults };
+  }
+
+  function setFetcherError(key: string, routeId: string, error: any) {
+    let boundaryMatch = findNearestBoundary(state.matches, routeId);
+    deleteFetcher(key);
+    updateState({
+      errors: {
+        [boundaryMatch.route.id]: error,
+      },
+      fetchers: new Map(state.fetchers),
+    });
   }
 
   function deleteFetcher(key: string): void {
