@@ -1778,7 +1778,8 @@ export function createStaticHandler(init: StaticHandlerInit): StaticHandler {
       );
 
       if (request.signal.aborted) {
-        throw new Error("query() aborted");
+        let method = isRouteRequest ? "queryRoute" : "query";
+        throw new Error(`${method}() call aborted`);
       }
     }
 
@@ -1860,12 +1861,14 @@ export function createStaticHandler(init: StaticHandlerInit): StaticHandler {
         callLoaderOrAction("loader", request, m, true, isRouteRequest)
       ),
     ]);
+
     if (request.signal.aborted) {
-      throw new Error("query() aborted");
+      let method = isRouteRequest ? "queryRoute" : "query";
+      throw new Error(`${method}() call aborted`);
     }
 
     // Can't do anything with these without the Remix side of things, so just
-    // cancel them for no
+    // cancel them for now
     results.forEach((result) => {
       if (isDeferredResult(result)) {
         result.deferredData.cancel();
